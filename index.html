@@ -1,0 +1,676 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Advanced Wars - 2 Phase Move</title>
+    <style>
+        body {
+            font-family: 'Courier New', Courier, monospace;
+            background-color: #222;
+            color: white;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            margin: 0;
+            padding: 20px;
+        }
+        #game-layout {
+            display: flex;
+            gap: 20px;
+        }
+        canvas {
+            background-color: #000;
+            border: 2px solid #555;
+            cursor: crosshair;
+        }
+        #ui-panel {
+            width: 250px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .panel-box {
+            background: #333;
+            padding: 10px;
+            border: 1px solid #555;
+        }
+        button {
+            background: #444;
+            color: white;
+            border: 1px solid #666;
+            padding: 8px;
+            width: 100%;
+            cursor: pointer;
+            margin-bottom: 4px;
+            text-align: left;
+        }
+        button:hover { background: #555; }
+        
+        /* The Floating Menu */
+        #context-menu {
+            position: absolute;
+            background: rgba(0, 0, 0, 0.95);
+            border: 2px solid #fff;
+            padding: 5px;
+            display: none;
+            z-index: 100;
+            min-width: 100px;
+        }
+        #context-menu button {
+            text-align: center;
+            font-weight: bold;
+            border: 1px solid #777;
+            margin: 2px 0;
+        }
+
+        .p1 { color: #ff9900; }
+        .p2 { color: #4fa3ff; }
+        
+        .stat-line { margin-bottom: 4px; font-size: 13px; }
+    </style>
+</head>
+<body>
+
+    <h1>TACTICAL ENGINE</h1>
+
+    <div id="game-layout">
+        <div style="position: relative;">
+            <canvas id="gameCanvas" width="800" height="800"></canvas>
+            <div id="context-menu"></div>
+        </div>
+
+        <div id="ui-panel">
+            <div class="panel-box">
+                <h3 style="margin-top:0;">GAME STATE</h3>
+                <div id="turn-display">SETUP MODE</div>
+                <div class="p1" id="money-p1">P1: $0</div>
+                <div class="p2" id="money-p2">P2: $0</div>
+                <button id="btn-start" onclick="startGame()">PLAY GAME</button>
+                <button id="btn-end" style="display:none;" onclick="endTurn()">END TURN</button>
+            </div>
+
+            <div class="panel-box" id="editor-box">
+                <h3>EDITOR</h3>
+                <div>Terrain:</div>
+                <button onclick="setTool('grass')">Grass</button>
+                <button onclick="setTool('forest')">Forest</button>
+                <button onclick="setTool('mountain')">Mountain</button>
+                <button onclick="setTool('road')">Road</button>
+                <button onclick="setTool('water')">Water</button>
+                <hr>
+                <div>Structures (Set Color):</div>
+                <button onclick="setOwner(0)">Grey (Neutral)</button>
+                <button onclick="setOwner(1)" class="p1">Orange (P1)</button>
+                <button onclick="setOwner(2)" class="p2">Blue (P2)</button>
+                <button onclick="setTool('city')">City</button>
+                <button onclick="setTool('factory')">Factory</button>
+                <button onclick="setTool('hq')">HQ</button>
+                <hr>
+                <div>Units:</div>
+                <button onclick="setTool('infantry')">Infantry</button>
+                <button onclick="setTool('tank')">Tank</button>
+                <button onclick="setTool('artillery')">Artillery</button>
+                <button onclick="setTool('erase')">Eraser</button>
+            </div>
+
+            <div class="panel-box" id="production-box" style="display:none;">
+                <h3>PRODUCTION</h3>
+                <button onclick="produce('infantry')">Infantry ($1000)</button>
+                <button onclick="produce('tank')">Tank ($7000)</button>
+                <button onclick="produce('artillery')">Artillery ($6000)</button>
+                <button onclick="closeProduction()">Cancel</button>
+            </div>
+
+            <div class="panel-box">
+                <div id="hover-info" class="stat-line">Hover map...</div>
+            </div>
+        </div>
+    </div>
+
+<script>
+/** 
+ * CONSTANTS 
+ */
+const TILE = 40;
+const MAP_W = 20;
+const MAP_H = 20;
+
+// Terrain Stats
+const TERRAIN = {
+    grass:    { def: 10, cost: {foot:1, tread:1, tires:2} },
+    forest:   { def: 30, cost: {foot:1, tread:2, tires:2} },
+    mountain: { def: 40, cost: {foot:2, tread:99, tires:99} },
+    road:     { def: 0,  cost: {foot:1, tread:1, tires:1} },
+    water:    { def: 0,  cost: {foot:99, tread:99, tires:99} },
+    city:     { def: 20, cost: {foot:1, tread:1, tires:1}, hp: 200 },
+    factory:  { def: 30, cost: {foot:1, tread:1, tires:1}, hp: 200 },
+    hq:       { def: 40, cost: {foot:1, tread:1, tires:1}, hp: 200 }
+};
+
+// Unit Stats
+const UNITS = {
+    infantry: { 
+        cost: 1000, move: 3, type: 'foot', range: [1,1],
+        dmg: { infantry: 60, tank: 5, artillery: 15, city: 0 } 
+    },
+    tank: { 
+        cost: 7000, move: 6, type: 'tread', range: [1,1],
+        dmg: { infantry: 75, tank: 55, artillery: 70, city: 0 } 
+    },
+    artillery: { 
+        cost: 6000, move: 5, type: 'tread', range: [2,3],
+        dmg: { infantry: 90, tank: 80, artillery: 85, city: 0 } 
+    }
+};
+
+const COLORS = {
+    p1: '#ff9900', p2: '#4fa3ff', neutral: '#888',
+    grass: '#4caf50', forest: '#1b5e20', mountain: '#5d4037',
+    road: '#9e9e9e', water: '#0288d1',
+    move: 'rgba(0,0,255,0.4)', attack: 'rgba(255,0,0,0.5)'
+};
+
+/** 
+ * GAME STATE 
+ */
+let map = [];
+let units = [];
+let turn = 1; 
+let money = { 1: 0, 2: 0 };
+let mode = 'editor'; // editor, play
+let inputState = 'idle'; // idle, selecting_move, moved_waiting, aiming
+let tool = 'grass';
+let owner = 0;
+
+// Selection vars
+let activeUnit = null; // The unit currently being manipulated
+let activeFactory = null;
+let validMoves = [];
+let validTargets = [];
+
+// Init Map
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+for(let y=0; y<MAP_H; y++) {
+    let row = [];
+    for(let x=0; x<MAP_W; x++) row.push({x, y, type: 'grass', owner: 0, capHP: 200});
+    map.push(row);
+}
+
+/** 
+ * CORE FUNCTIONS 
+ */
+function startGame() {
+    mode = 'play';
+    turn = 1;
+    money = { 1: 1000, 2: 1000 };
+    document.getElementById('editor-box').style.display = 'none';
+    document.getElementById('btn-start').style.display = 'none';
+    document.getElementById('btn-end').style.display = 'block';
+    document.getElementById('turn-display').innerText = "PLAYER 1 TURN";
+    document.getElementById('turn-display').style.color = COLORS.p1;
+    updateUI();
+    draw();
+}
+
+function endTurn() {
+    // Reset selection
+    activeUnit = null;
+    inputState = 'idle';
+    validMoves = [];
+    validTargets = [];
+    document.getElementById('context-menu').style.display = 'none';
+
+    // Money
+    map.flat().forEach(t => {
+        if((t.type==='city'||t.type==='hq'||t.type==='factory') && t.owner === turn) {
+            money[turn] += 1000;
+        }
+    });
+
+    turn = turn === 1 ? 2 : 1;
+    
+    // Reset Unit States
+    units.forEach(u => {
+        if(u.owner === turn) u.state = 'ready'; // ready, moved, done
+    });
+
+    document.getElementById('turn-display').innerText = `PLAYER ${turn} TURN`;
+    document.getElementById('turn-display').style.color = turn===1 ? COLORS.p1 : COLORS.p2;
+    updateUI();
+    draw();
+}
+
+function updateUI() {
+    document.getElementById('money-p1').innerText = `P1: $${money[1]}`;
+    document.getElementById('money-p2').innerText = `P2: $${money[2]}`;
+}
+
+/** 
+ * INTERACTION LOGIC 
+ */
+canvas.addEventListener('mousedown', e => {
+    const rect = canvas.getBoundingClientRect();
+    const x = Math.floor((e.clientX - rect.left) / TILE);
+    const y = Math.floor((e.clientY - rect.top) / TILE);
+    if(x<0 || x>=MAP_W || y<0 || y>=MAP_H) return;
+
+    if(mode === 'editor') handleEditor(x, y);
+    else handlePlay(x, y);
+    
+    draw();
+});
+
+canvas.addEventListener('mousemove', e => {
+    const rect = canvas.getBoundingClientRect();
+    const x = Math.floor((e.clientX - rect.left) / TILE);
+    const y = Math.floor((e.clientY - rect.top) / TILE);
+    if(x<0 || x>=MAP_W || y<0 || y>=MAP_H) return;
+    
+    let t = map[y][x];
+    let u = getUnit(x, y);
+    let info = `${t.type.toUpperCase()} (Def:${TERRAIN[t.type].def}%)`;
+    if(u) info += ` | UNIT: ${u.type.toUpperCase()} HP:${Math.ceil(u.hp)}`;
+    document.getElementById('hover-info').innerText = info;
+});
+
+function handleEditor(x, y) {
+    if(['grass','forest','mountain','road','water'].includes(tool)) {
+        map[y][x].type = tool;
+        map[y][x].owner = 0;
+    } else if(['city','hq','factory'].includes(tool)) {
+        map[y][x].type = tool;
+        map[y][x].owner = owner;
+        map[y][x].capHP = 200;
+    } else if (tool === 'erase') {
+        const idx = units.findIndex(u => u.x === x && u.y === y);
+        if(idx > -1) units.splice(idx, 1);
+    } else {
+        // Place unit
+        const idx = units.findIndex(u => u.x === x && u.y === y);
+        if(idx > -1) units.splice(idx, 1);
+        if(owner !== 0) {
+            units.push({
+                x, y, type: tool, owner: owner, hp: 100, state: 'ready'
+            });
+        }
+    }
+}
+
+function handlePlay(x, y) {
+    const clickedUnit = getUnit(x, y);
+    const clickedTile = map[y][x];
+
+    // 1. AIMING STATE (Firing weapon)
+    if (inputState === 'aiming') {
+        // check if clicked a red square
+        const target = validTargets.find(t => t.x === x && t.y === y);
+        if (target) {
+            combat(activeUnit, target.unit);
+            finalizeAction();
+        } else {
+            // Cancel aiming, go back to menu
+            inputState = 'moved_waiting';
+            showMenu(activeUnit.x, activeUnit.y);
+            validTargets = [];
+        }
+        return;
+    }
+
+    // 2. SELECTING MOVE (Blue Squares visible)
+    if (inputState === 'selecting_move') {
+        const move = validMoves.find(m => m.x === x && m.y === y);
+        if (move) {
+            // Check collisions (can't land on own unit unless it's itself)
+            if (clickedUnit && clickedUnit !== activeUnit) return; 
+            
+            // EXECUTE MOVE
+            activeUnit.x = x;
+            activeUnit.y = y;
+            activeUnit.state = 'moved'; // CRITICAL: Enters interim state
+            
+            // Dumb move complete. Reset inputs.
+            inputState = 'idle';
+            validMoves = [];
+        } else {
+            // Clicked outside, deselect
+            activeUnit = null;
+            validMoves = [];
+            inputState = 'idle';
+        }
+        return;
+    }
+
+    // 3. FACTORY INTERACTION
+    if (inputState === 'idle' && !clickedUnit && clickedTile.type === 'factory' && clickedTile.owner === turn) {
+        activeFactory = {x, y};
+        document.getElementById('production-box').style.display = 'block';
+        return;
+    }
+    document.getElementById('production-box').style.display = 'none';
+
+    // 4. UNIT CLICKING
+    if (clickedUnit && clickedUnit.owner === turn) {
+        
+        // Scenario A: Unit has not moved yet
+        if (clickedUnit.state === 'ready') {
+            activeUnit = clickedUnit;
+            inputState = 'selecting_move';
+            calcMoves(activeUnit);
+            return;
+        }
+
+        // Scenario B: Unit has moved (is semi-transparent), waiting for orders
+        if (clickedUnit.state === 'moved') {
+            activeUnit = clickedUnit;
+            inputState = 'moved_waiting';
+            showMenu(x, y);
+            return;
+        }
+        
+        // Scenario C: Unit is done (Dark grey) -> Do nothing
+    }
+}
+
+/**
+ * GAME LOGIC
+ */
+
+function calcMoves(unit) {
+    validMoves = [];
+    let visited = new Set();
+    let queue = [{x: unit.x, y: unit.y, cost: 0}];
+    const maxMove = UNITS[unit.type].move;
+    const mType = UNITS[unit.type].type;
+
+    while(queue.length) {
+        queue.sort((a,b) => a.cost - b.cost); // Dijkstra
+        let cur = queue.shift();
+        let key = `${cur.x},${cur.y}`;
+        if(visited.has(key)) continue;
+        visited.add(key);
+        validMoves.push({x: cur.x, y: cur.y});
+
+        [[0,1],[0,-1],[1,0],[-1,0]].forEach(d => {
+            let nx = cur.x+d[0], ny = cur.y+d[1];
+            if(nx>=0 && nx<MAP_W && ny>=0 && ny<MAP_H) {
+                // Check enemy collision
+                let occ = getUnit(nx, ny);
+                if(occ && occ.owner !== unit.owner) return; // Blocked
+
+                let cost = TERRAIN[map[ny][nx].type].cost[mType];
+                if(cur.cost + cost <= maxMove) {
+                    queue.push({x: nx, y: ny, cost: cur.cost + cost});
+                }
+            }
+        });
+    }
+}
+
+function showMenu(x, y) {
+    const menu = document.getElementById('context-menu');
+    menu.style.left = (x*TILE + 40) + 'px';
+    menu.style.top = (y*TILE) + 'px';
+    menu.style.display = 'block';
+    menu.innerHTML = '';
+
+    // FIRE
+    const targets = getTargets(activeUnit);
+    if(targets.length > 0) {
+        let btn = document.createElement('button');
+        btn.innerText = "FIRE";
+        btn.onclick = () => {
+            inputState = 'aiming';
+            validTargets = targets;
+            menu.style.display = 'none';
+            draw();
+        };
+        menu.appendChild(btn);
+    }
+
+    // CAPTURE
+    let t = map[activeUnit.y][activeUnit.x];
+    if(activeUnit.type === 'infantry' && 
+       (t.type === 'city' || t.type === 'hq' || t.type === 'factory') && 
+       t.owner !== activeUnit.owner) {
+        let btn = document.createElement('button');
+        btn.innerText = "CAPTURE";
+        btn.onclick = () => {
+            capture(activeUnit, t);
+            finalizeAction();
+        };
+        menu.appendChild(btn);
+    }
+
+    // WAIT
+    let btnWait = document.createElement('button');
+    btnWait.innerText = "WAIT";
+    btnWait.onclick = () => finalizeAction();
+    menu.appendChild(btnWait);
+
+    // CANCEL
+    let btnCancel = document.createElement('button');
+    btnCancel.innerText = "CANCEL";
+    btnCancel.onclick = () => {
+        menu.style.display = 'none';
+        inputState = 'idle'; // Unit stays in 'moved' state
+    };
+    menu.appendChild(btnCancel);
+}
+
+function getTargets(unit) {
+    let res = [];
+    const [min, max] = UNITS[unit.type].range;
+    units.forEach(u => {
+        if(u.owner !== unit.owner) {
+            let dist = Math.abs(u.x - unit.x) + Math.abs(u.y - unit.y);
+            if(dist >= min && dist <= max) res.push({x: u.x, y: u.y, unit: u});
+        }
+    });
+    return res;
+}
+
+function combat(att, def) {
+    // Attack
+    let dmg = calcDamage(att, def, false);
+    def.hp = Math.max(0, def.hp - dmg);
+    
+    // Counter?
+    if(def.hp > 0 && def.type !== 'artillery') { // Arty no counter
+        const [min, max] = UNITS[def.type].range;
+        let dist = Math.abs(att.x - def.x) + Math.abs(att.y - def.y);
+        if(dist >= min && dist <= max) {
+            let cDmg = calcDamage(def, att, true);
+            att.hp = Math.max(0, att.hp - cDmg);
+        }
+    }
+    // Cleanup
+    units = units.filter(u => u.hp > 0);
+}
+
+function calcDamage(att, def, counter) {
+    let base = UNITS[att.type].dmg[def.type];
+    let hpPerc = Math.ceil(att.hp) / 100;
+    let terrDef = TERRAIN[map[def.y][def.x].type].def;
+    
+    let raw = base * hpPerc;
+    if(counter) raw *= 0.5; // Counter penalty
+    
+    // Terrain mitigation: Damage * (1 - def%)
+    return raw * (1 - (terrDef/100));
+}
+
+function capture(unit, tile) {
+    let pow = Math.ceil(unit.hp);
+    tile.capHP -= pow;
+    if(tile.capHP <= 0) {
+        tile.owner = unit.owner;
+        tile.capHP = 200;
+        if(tile.type === 'hq') {
+            alert(`PLAYER ${unit.owner} WINS!`);
+            location.reload();
+        }
+    }
+}
+
+function finalizeAction() {
+    if(activeUnit) activeUnit.state = 'done';
+    activeUnit = null;
+    inputState = 'idle';
+    document.getElementById('context-menu').style.display = 'none';
+    validTargets = [];
+    draw();
+}
+
+/**
+ * PRODUCTION
+ */
+function produce(type) {
+    let cost = UNITS[type].cost;
+    if(money[turn] >= cost) {
+        money[turn] -= cost;
+        units.push({
+            x: activeFactory.x, y: activeFactory.y,
+            type: type, owner: turn, hp: 100, state: 'done' // Spawns exhausted
+        });
+        updateUI();
+        closeProduction();
+        draw();
+    } else {
+        alert("Need more cash!");
+    }
+}
+function closeProduction() {
+    document.getElementById('production-box').style.display = 'none';
+    activeFactory = null;
+}
+function setTool(t) { tool = t; }
+function setOwner(o) { owner = o; }
+function getUnit(x, y) { return units.find(u => u.x===x && u.y===y); }
+
+
+/**
+ * RENDER
+ */
+function draw() {
+    ctx.clearRect(0,0, canvas.width, canvas.height);
+
+    // Map
+    for(let y=0; y<MAP_H; y++) {
+        for(let x=0; x<MAP_W; x++) {
+            let t = map[y][x];
+            let px=x*TILE, py=y*TILE;
+            
+            // Base
+            ctx.fillStyle = COLORS[t.type] || '#000';
+            ctx.fillRect(px, py, TILE, TILE);
+            
+            // Detail Sprinkles
+            ctx.fillStyle = 'rgba(0,0,0,0.2)';
+            let seed = (x*11 + y*17)%5;
+            if(t.type==='grass') ctx.fillRect(px+seed*2, py+seed*3, 4, 4);
+            if(t.type==='forest') ctx.fillRect(px+10, py+10, 20, 20);
+            if(t.type==='mountain') { ctx.fillStyle='#3e2723'; ctx.beginPath(); ctx.moveTo(px+20,py+5); ctx.lineTo(px+35,py+35); ctx.lineTo(px+5,py+35); ctx.fill(); }
+            if(t.type==='road') { ctx.fillStyle='#555'; ctx.fillRect(px+15, py, 10, TILE); }
+            if(t.type==='water') { ctx.fillStyle='#81d4fa'; ctx.fillRect(px+5, py+10+seed, 20, 4); }
+
+            // Buildings
+            if(['city','hq','factory'].includes(t.type)) {
+                // 1. Black Outline (Behind)
+                ctx.fillStyle = '#000';
+                ctx.fillRect(px+14, py+14, 32, 32); 
+
+                // 2. Main Color Rectangle
+                ctx.fillStyle = t.owner===1 ? COLORS.p1 : (t.owner===2?COLORS.p2 : COLORS.neutral);
+                ctx.fillRect(px+5, py+5, 30, 30);
+                
+                // Text/Detail
+                ctx.fillStyle = '#000';
+                ctx.font = '12px monospace';
+                if(t.type==='hq') ctx.fillText("HQ", px+13, py+24);
+                if(t.type==='factory') ctx.fillText("FAC", px+10, py+24);
+                if(t.type==='city') ctx.fillText("CTY", px+10, py+24);
+            }
+            
+            // Grid
+            ctx.strokeStyle = '#222';
+            ctx.strokeRect(px, py, TILE, TILE);
+        }
+    }
+
+    // Overlays
+    if(inputState === 'selecting_move') {
+        ctx.fillStyle = COLORS.move;
+        for(let m of validMoves) ctx.fillRect(m.x*TILE, m.y*TILE, TILE, TILE);
+    }
+    if(inputState === 'aiming') {
+        ctx.fillStyle = COLORS.attack;
+        for(let t of validTargets) ctx.fillRect(t.x*TILE, t.y*TILE, TILE, TILE);
+    }
+
+    // Units
+    for(let u of units) {
+        let px = u.x*TILE, py = u.y*TILE;
+        
+        ctx.save();
+        if (u.state === 'moved') ctx.globalAlpha = 0.5; // GHOST EFFECT
+        if (u.state === 'done') ctx.filter = 'grayscale(100%) brightness(0.5)'; // DARK/GREY
+
+        let teamColor = u.owner===1 ? COLORS.p1 : COLORS.p2;
+        
+        if(u.type==='infantry') {
+            // Outlines (Head + Legs)
+            ctx.fillStyle = '#000';
+            ctx.fillRect(px+11, py+4, 18, 18); // Outline for Head
+            ctx.fillRect(px+9, py+21, 22, 12); // Outline for Legs
+            
+            // Fill
+            ctx.fillStyle = teamColor;
+            ctx.fillRect(px+12, py+5, 16, 16); 
+            ctx.fillRect(px+10, py+22, 20, 10);
+        
+        } else if(u.type==='tank') {
+            // Outline (Body)
+            ctx.fillStyle = '#000';
+            ctx.fillRect(px+4, py+9, 32, 22);
+
+            // Fill
+            ctx.fillStyle = teamColor;
+            ctx.fillRect(px+5, py+10, 30, 20); 
+            
+            // Detail (Turret)
+            ctx.fillStyle='#000'; 
+            ctx.fillRect(px+15, py+5, 10, 15);
+
+        } else if(u.type==='artillery') {
+            // Outline (Body)
+            ctx.fillStyle = '#000';
+            ctx.fillRect(px+4, py+14, 32, 17);
+
+            // Fill
+            ctx.fillStyle = teamColor;
+            ctx.fillRect(px+5, py+15, 30, 15); 
+            
+            // Detail (Barrel)
+            ctx.fillStyle='#000'; 
+            ctx.fillRect(px+15, py+8, 5, 20);
+        }
+
+        // HP
+        if(u.hp < 100) {
+            ctx.fillStyle = '#fff';
+            ctx.font = '12px monospace';
+            ctx.fillText(Math.ceil(u.hp/10), px+25, py+35);
+        }
+
+        ctx.restore();
+    }
+}
+
+
+// Start
+draw();
+</script>
+</body>
+</html>
